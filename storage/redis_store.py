@@ -1,0 +1,98 @@
+import json
+import time
+import redis
+from models.l3_features import StateValue
+
+SCOPE_MATCH = "match"
+SCOPE_TEAM = "team"
+SCOPE_PLAYER = "player"
+
+
+class MatchStateRedisStore:
+    def __init__(self, host: str, port: int = 6379, password: str | None = None, ttl_seconds: int = 4 * 3600):
+        self._r = redis.Redis(host=host, port=port, password=password, decode_responses=True)
+        self._ttl = ttl_seconds  # backstop cleanup in case explicit DEL on match-end is missed
+
+    @staticmethod
+    def _key(match_id: str, scope: str) -> str:
+        return f"matchstate:{match_id}:{scope}"
+
+    @staticmethod
+    def _field(feature_id: int, entity_id: int | None) -> str:
+        return f"{feature_id}:{entity_id if entity_id is not None else ''}"
+
+    def set_state(self, match_id: str, scope: str, sv: StateValue) -> None:
+        key = self._key(match_id, scope)
+        field = self._field(sv.feature_id, sv.entity_id)
+        value = json.dumps({"value": sv.value, "last_updated_ts": sv.last_updated_ts})
+        pipe = self._r.pipeline()
+        pipe.hset(key, field, value)
+        pipe.expire(key, self._ttl)
+        pipe.execute()
+
+    def get_all(self, match_id: str, scope: str) -> list[StateValue]:
+        key = self._key(match_id, scope)
+        raw = self._r.hgetall(key)
+        result = []
+        for field, value in raw.items():
+            feature_id_str, entity_id_str = field.split(":")
+            parsed = json.loads(value)
+            result.append(StateValue(
+                feature_id=int(feature_id_str),
+                entity_id=int(entity_id_str) if entity_id_str else None,
+                value=parsed["value"],
+                last_updated_ts=parsed["last_updated_ts"],
+            ))
+        return result
+
+    @staticmethod
+    def _series_key(match_id: str, scope: str, feature_id: int, entity_id: int | None) -> str:
+        return f"matchstate_series:{match_id}:{scope}:{feature_id}:{entity_id if entity_id is not None else ''}"
+
+    def append_state_series(self, match_id: str, scope: str, sv: StateValue) -> None:
+        """Appends a state value to a time-series list for post-match trend analysis."""
+        key = self._series_key(match_id, scope, sv.feature_id, sv.entity_id)
+        value = json.dumps({"value": sv.value, "last_updated_ts": sv.last_updated_ts})
+        pipe = self._r.pipeline()
+        pipe.rpush(key, value)
+        pipe.expire(key, self._ttl)
+        # Keep track of all series keys for this match for cleanup
+        idx_key = f"matchstate_series_idx:{match_id}"
+        pipe.sadd(idx_key, key)
+        pipe.expire(idx_key, self._ttl)
+        pipe.execute()
+
+    def get_state_series(self, match_id: str, scope: str, feature_id: int, entity_id: int | None) -> list[StateValue]:
+        """Retrieves the full time-series of state values for a specific feature/entity."""
+        key = self._series_key(match_id, scope, feature_id, entity_id)
+        raw_list = self._r.lrange(key, 0, -1)
+        result = []
+        for raw in raw_list:
+            parsed = json.loads(raw)
+            result.append(StateValue(
+                feature_id=feature_id,
+                entity_id=entity_id,
+                value=parsed["value"],
+                last_updated_ts=parsed["last_updated_ts"],
+            ))
+        return result
+
+    def release_match(self, match_id: str) -> None:
+        """Call on match end — explicit cleanup; TTL is the backstop."""
+        pipe = self._r.pipeline()
+        for scope in (SCOPE_MATCH, SCOPE_TEAM, SCOPE_PLAYER):
+            pipe.delete(self._key(match_id, scope))
+            
+        # Clean up series keys
+        idx_key = f"matchstate_series_idx:{match_id}"
+        series_keys = self._r.smembers(idx_key)
+        for k in series_keys:
+            pipe.delete(k)
+        pipe.delete(idx_key)
+        pipe.execute()
+
+
+# Usage:
+# store = MatchStateRedisStore(host="10.0.0.5")
+# store.set_state(match_id, SCOPE_TEAM, StateValue(feature_id=12, entity_id=1, value=0.63, last_updated_ts=int(time.time())))
+# team_states = store.get_all(match_id, SCOPE_TEAM)

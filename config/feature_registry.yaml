@@ -1,0 +1,16 @@
+features:
+  - feature_id: 1
+    feature_name: player_speed
+    feature_description: "Instantaneous player speed in m/s"
+    feature_type: FRAME_WISE
+    category: INDIVIDUAL
+    unit: "m/s"
+    value_range: [0.0, 12.0]
+  - feature_id: 2
+    feature_name: team_possession_pct
+    feature_description: "Rolling possession percentage for a team"
+    feature_type: MATCH_STATE
+    category: TEAM
+    unit: "ratio"
+    value_range: [0.0, 1.0]
+    update_trigger: CONTINUOUS
