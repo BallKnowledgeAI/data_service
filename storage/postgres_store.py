@@ -42,11 +42,10 @@ class TeamInfoORM(Base):
     __tablename__ = "team_info"
     id = Column(Integer, primary_key=True, autoincrement=True)
     match_id = Column(String, nullable=False, index=True)
-    side = Column(String, nullable=False)  # "self" | "opponent"
     team_id = Column(Integer, nullable=False)
     formation = Column(String, nullable=False)
     squad = relationship("SquadEntryORM", back_populates="team", cascade="all, delete-orphan")
-    __table_args__ = (UniqueConstraint("match_id", "side", name="uq_match_side"),)
+    __table_args__ = (UniqueConstraint("match_id", "team_id", name="uq_match_team"),)
 
 
 class SquadEntryORM(Base):
@@ -75,13 +74,13 @@ def get_session_factory(db_url: str):
     return sessionmaker(bind=engine)
 
 
-def upsert_identity_resolution(session_factory, match_id: str, side: str, jersey_number: int, entity_id: int) -> None:
+def upsert_identity_resolution(session_factory, match_id: str, team_id: int, jersey_number: int, entity_id: int) -> None:
     """Fire-and-forget, async-callable. Idempotent UPSERT keyed on (team_info_id, jersey_number).
     Safe to call concurrently — on conflict, overwrites entity_id in place.
     Call this off the hot path (e.g. via a background task queue) — does not block pipeline progress."""
     session = session_factory()
     try:
-        team = session.query(TeamInfoORM).filter_by(match_id=match_id, side=side).one()
+        team = session.query(TeamInfoORM).filter_by(match_id=match_id, team_id=team_id).one()
         stmt = (
             pg_insert(SquadEntryORM)
             .values(team_info_id=team.id, jersey_number=jersey_number, entity_id=entity_id)

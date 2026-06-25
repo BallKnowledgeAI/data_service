@@ -50,17 +50,55 @@ class MatchStateRedisStore:
         return f"matchstate_series:{match_id}:{scope}:{feature_id}:{entity_id if entity_id is not None else ''}"
 
     def append_state_series(self, match_id: str, scope: str, sv: StateValue) -> None:
-        """Appends a state value to a time-series list for post-match trend analysis."""
+        """Appends a state value to a time-series list for post-match trend analysis using a 1-minute averaging bucket to prevent noise."""
         key = self._series_key(match_id, scope, sv.feature_id, sv.entity_id)
-        value = json.dumps({"value": sv.value, "last_updated_ts": sv.last_updated_ts})
-        pipe = self._r.pipeline()
-        pipe.rpush(key, value)
-        pipe.expire(key, self._ttl)
-        # Keep track of all series keys for this match for cleanup
+        temp_key = f"{key}:temp"
         idx_key = f"matchstate_series_idx:{match_id}"
-        pipe.sadd(idx_key, key)
-        pipe.expire(idx_key, self._ttl)
-        pipe.execute()
+        
+        current_minute = sv.last_updated_ts // 60000
+        raw_temp = self._r.hgetall(temp_key)
+        
+        if not raw_temp:
+            # First value, initialize the bucket
+            pipe = self._r.pipeline()
+            pipe.hset(temp_key, mapping={"minute": current_minute, "sum": sv.value, "count": 1, "last_ts": sv.last_updated_ts})
+            pipe.expire(temp_key, self._ttl)
+            pipe.sadd(idx_key, temp_key)  # Track temp key for cleanup
+            pipe.execute()
+            return
+            
+        stored_minute = int(raw_temp.get("minute", 0))
+        
+        if current_minute == stored_minute:
+            # We are in the same minute: Accumulate to calculate the average
+            pipe = self._r.pipeline()
+            pipe.hincrbyfloat(temp_key, "sum", sv.value)
+            pipe.hincrby(temp_key, "count", 1)
+            pipe.hset(temp_key, "last_ts", sv.last_updated_ts)
+            pipe.execute()
+            
+        elif current_minute > stored_minute:
+            # Minute has rolled over: Flush the average of the old bucket to the time series
+            old_sum = float(raw_temp.get("sum", 0))
+            old_count = int(raw_temp.get("count", 1))
+            old_last_ts = int(raw_temp.get("last_ts", sv.last_updated_ts))
+            
+            avg_value = old_sum / old_count
+            value_to_append = json.dumps({"value": round(avg_value, 4), "last_updated_ts": old_last_ts})
+            
+            pipe = self._r.pipeline()
+            # Push the averaged value
+            pipe.rpush(key, value_to_append)
+            pipe.expire(key, self._ttl)
+            
+            # Reset bucket for the new minute
+            pipe.hset(temp_key, mapping={"minute": current_minute, "sum": sv.value, "count": 1, "last_ts": sv.last_updated_ts})
+            pipe.expire(temp_key, self._ttl)
+            
+            # Track keys for cleanup
+            pipe.sadd(idx_key, key)
+            pipe.expire(idx_key, self._ttl)
+            pipe.execute()
 
     def get_state_series(self, match_id: str, scope: str, feature_id: int, entity_id: int | None) -> list[StateValue]:
         """Retrieves the full time-series of state values for a specific feature/entity."""
