@@ -83,7 +83,13 @@ def upsert_identity_resolution(session_factory, match_id: str, team_id: int, jer
         team = session.query(TeamInfoORM).filter_by(match_id=match_id, team_id=team_id).one()
         stmt = (
             pg_insert(SquadEntryORM)
-            .values(team_info_id=team.id, jersey_number=jersey_number, entity_id=entity_id)
+            .values(
+                team_info_id=team.id,
+                jersey_number=jersey_number,
+                entity_id=entity_id,
+                role="UNKNOWN",       # required by NOT NULL constraint for the insert part
+                is_starter=False      # required by NOT NULL constraint for the insert part
+            )
             .on_conflict_do_update(
                 constraint="uq_team_jersey",
                 set_={"entity_id": entity_id},
