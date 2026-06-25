@@ -30,9 +30,8 @@ for _p in (_SCHEMA_ROOT, _DI_SRC):
 # ---------------------------------------------------------------------------
 # schema_design imports
 # ---------------------------------------------------------------------------
+import requests
 from config.settings import settings                                   # noqa: E402
-from storage.postgres_store import get_session_factory, TeamInfoORM, SquadEntryORM  # noqa: E402
-from storage.redis_store import MatchStateRedisStore, SCOPE_TEAM       # noqa: E402
 from storage.memory_store import FrameFeatureBuffer                    # noqa: E402
 from models.l3_features import StateValue, FrameFeatureRecord, FeatureObservation  # noqa: E402
 from models.enums import Half                                          # noqa: E402
@@ -90,8 +89,7 @@ class IngestionEngine:
         self._frame_count: int = 0
 
         # Store handles (populated in start())
-        self._session_factory = None
-        self._redis_store: MatchStateRedisStore | None = None
+        self.api_url = "http://localhost:8000/api/v1"
         self._feature_buf: FrameFeatureBuffer | None = None
         self._registry: DataSourceRegistry | None = None
         self._source: StatsBombSource | None = None
@@ -105,16 +103,14 @@ class IngestionEngine:
         self._log("=== BallKnowledge Ingestion Engine ===")
 
         # 1. Stores
-        self._log("\n[1/3] Connecting to data stores...")
-        self._session_factory = get_session_factory(settings.postgres_url)
-        self._redis_store = MatchStateRedisStore(
-            host=settings.redis_host,
-            port=settings.redis_port,
-            password=settings.redis_auth,
-        )
-        self._redis_store._r.ping()
+        self._log("\n[1/3] Checking DataService API...")
+        try:
+            requests.get("http://localhost:8000/health", timeout=2)
+            self._log("      API OK.")
+        except requests.RequestException:
+            self._log("      WARNING: DataService API not reachable at http://localhost:8000")
+        
         self._feature_buf = FrameFeatureBuffer(window_size=self.frame_buffer_window)
-        self._log("      OK.")
 
         # 2. Registry + Source
         self._log("\n[2/3] Initialising StatsBomb Source...")
@@ -229,39 +225,16 @@ class IngestionEngine:
         team_name = event.payload.get("team_name")
         formation = event.metadata.get("formation", "Unknown")
 
-        session = self._session_factory()
         try:
-            existing = (
-                session.query(TeamInfoORM)
-                .filter_by(match_id=str(self.match_id))
-                .count()
+            res = requests.post(
+                f"{self.api_url}/matches/{self.match_id}/teams",
+                json={"team_id": team_id, "formation": formation},
+                timeout=5
             )
-            side = "self" if existing == 0 else "opponent"
-
-            team_info = (
-                session.query(TeamInfoORM)
-                .filter_by(match_id=str(self.match_id), team_id=team_id)
-                .first()
-            )
-            if not team_info:
-                team_info = TeamInfoORM(
-                    match_id=str(self.match_id),
-                    side=side,
-                    team_id=team_id,
-                    formation=formation,
-                )
-                session.add(team_info)
-                session.flush()
-
-            session.commit()
-            self._log(
-                f"  [Postgres] Team {team_name} (id={team_id}) -> {side}, {formation}"
-            )
+            if res.status_code == 200:
+                self._log(f"  [API] Team {team_name} (id={team_id}) registered.")
         except Exception as exc:
-            session.rollback()
-            self._log(f"  [Postgres ERROR] match_start: {exc}")
-        finally:
-            session.close()
+            self._log(f"  [API ERROR] match_start: {exc}")
 
     def _handle_lineup_position(self, event: DataEvent) -> None:
         team_id = event.payload.get("team_id")
@@ -270,35 +243,20 @@ class IngestionEngine:
         role_name = event.payload.get("position_name", "OUTFIELD")
         role = "GK" if role_name == "Goalkeeper" else "OUTFIELD"
 
-        session = self._session_factory()
-        try:
-            team_info = (
-                session.query(TeamInfoORM)
-                .filter_by(match_id=str(self.match_id), team_id=team_id)
-                .first()
-            )
-            if team_info and jersey is not None:
-                exists = (
-                    session.query(SquadEntryORM)
-                    .filter_by(team_info_id=team_info.id, jersey_number=jersey)
-                    .first()
+        if jersey is not None:
+            try:
+                requests.post(
+                    f"{self.api_url}/matches/{self.match_id}/teams/{team_id}/squad",
+                    json={
+                        "jersey_number": jersey,
+                        "entity_id": player_id,
+                        "role": role,
+                        "is_starter": True
+                    },
+                    timeout=5
                 )
-                if not exists:
-                    session.add(
-                        SquadEntryORM(
-                            team_info_id=team_info.id,
-                            jersey_number=jersey,
-                            entity_id=player_id,
-                            role=role,
-                            is_starter=True,
-                        )
-                    )
-                    session.commit()
-        except Exception as exc:
-            session.rollback()
-            self._log(f"  [Postgres ERROR] lineup: {exc}")
-        finally:
-            session.close()
+            except Exception as exc:
+                self._log(f"  [API ERROR] lineup: {exc}")
 
     def _handle_possession(self, event: DataEvent) -> None:
         team_id = event.payload.get("team_id")
@@ -319,8 +277,12 @@ class IngestionEngine:
                     value=round(count / total, 4),
                     last_updated_ts=event.timestamp_ms,
                 )
-                self._redis_store.set_state(str(self.match_id), SCOPE_TEAM, sv)
-                self._redis_store.append_state_series(str(self.match_id), SCOPE_TEAM, sv)
+                try:
+                    payload = sv.model_dump()
+                    requests.post(f"{self.api_url}/matches/{self.match_id}/state/team", json=payload, timeout=2)
+                    requests.post(f"{self.api_url}/matches/{self.match_id}/series/team", json=payload, timeout=2)
+                except Exception:
+                    pass
 
         # Progress line every 100 possession events
         if total % 100 == 0:
