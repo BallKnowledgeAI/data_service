@@ -1,6 +1,5 @@
 from sqlalchemy import create_engine, Column, String, Integer, Boolean, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 Base = declarative_base()
 
@@ -75,27 +74,25 @@ def get_session_factory(db_url: str):
 
 
 def upsert_identity_resolution(session_factory, match_id: str, team_id: int, jersey_number: int, entity_id: int) -> None:
-    """Fire-and-forget, async-callable. Idempotent UPSERT keyed on (team_info_id, jersey_number).
-    Safe to call concurrently — on conflict, overwrites entity_id in place.
+    """Update entity_id for an existing squad entry keyed on (match_id, team_id, jersey_number).
+    Raises ValueError if the team or squad entry does not exist — callers should surface this as a 404.
+    Safe to call concurrently — plain UPDATE is idempotent on the same jersey.
     Call this off the hot path (e.g. via a background task queue) — does not block pipeline progress."""
     session = session_factory()
     try:
-        team = session.query(TeamInfoORM).filter_by(match_id=match_id, team_id=team_id).one()
-        stmt = (
-            pg_insert(SquadEntryORM)
-            .values(
-                team_info_id=team.id,
-                jersey_number=jersey_number,
-                entity_id=entity_id,
-                role="UNKNOWN",       # required by NOT NULL constraint for the insert part
-                is_starter=False      # required by NOT NULL constraint for the insert part
+        team = session.query(TeamInfoORM).filter_by(match_id=match_id, team_id=team_id).first()
+        if not team:
+            raise ValueError(f"Team {team_id} not found for match {match_id}")
+
+        squad_entry = session.query(SquadEntryORM).filter_by(
+            team_info_id=team.id, jersey_number=jersey_number
+        ).first()
+        if not squad_entry:
+            raise ValueError(
+                f"Jersey #{jersey_number} not found in squad for team {team_id} in match {match_id}"
             )
-            .on_conflict_do_update(
-                constraint="uq_team_jersey",
-                set_={"entity_id": entity_id},
-            )
-        )
-        session.execute(stmt)
+
+        squad_entry.entity_id = entity_id
         session.commit()
     finally:
         session.close()

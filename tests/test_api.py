@@ -229,10 +229,26 @@ def test_update_identity():
         }
     )
 
-    # Upsert identity resolution
+    # Upsert identity resolution on an existing jersey
     response = client.patch(
         f"/api/v1/matches/{MATCH_ID}/teams/{TEAM_ID_1}/squad/10/identity",
         json={"entity_id": 9999}
     )
     assert response.status_code == 200
     assert response.json()["status"] == "success"
+
+
+def test_update_identity_missing_jersey():
+    # Setup team but do NOT register jersey #99
+    client.post(
+        f"/api/v1/matches/{MATCH_ID}/teams",
+        json={"team_id": TEAM_ID_1, "formation": "4-3-3"}
+    )
+
+    # Attempt to resolve identity for a jersey that was never registered
+    response = client.patch(
+        f"/api/v1/matches/{MATCH_ID}/teams/{TEAM_ID_1}/squad/99/identity",
+        json={"entity_id": 9999}
+    )
+    assert response.status_code == 404
+    assert "Jersey #99" in response.json()["detail"]

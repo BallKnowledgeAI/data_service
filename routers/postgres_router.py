@@ -68,5 +68,8 @@ def register_squad_entry(match_id: str, team_id: int, entry: SquadEntryCreate, d
 
 @router.patch("/matches/{match_id}/teams/{team_id}/squad/{jersey_number}/identity")
 def update_identity(match_id: str, team_id: int, jersey_number: int, identity: IdentityUpdate):
-    upsert_identity_resolution(session_factory, match_id, team_id, jersey_number, identity.entity_id)
+    try:
+        upsert_identity_resolution(session_factory, match_id, team_id, jersey_number, identity.entity_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     return {"status": "success"}
