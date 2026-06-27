@@ -137,6 +137,7 @@ print("\n[4] L3 Feature models")
 from models.l3_features import (
     FeatureDefinition, FeatureObservation, FrameFeatureRecord,
     StateValue, MatchStateStore, SquadEntry, TeamInfo, PreMatchInfo,
+    ScalarValue,
 )
 
 def _feature_definition():
@@ -174,13 +175,13 @@ def _frame_feature_record():
 test("FrameFeatureRecord instantiation", _frame_feature_record)
 
 def _state_value():
-    sv = StateValue(feature_id=2, entity_id=1, value=0.63, last_updated_ts=1_700_000_000)
+    sv = StateValue(feature_id=2, entity_id=1, value=ScalarValue(value=0.63), last_updated_ts=1_700_000_000)
     assert sv.feature_id == 2
 
 test("StateValue instantiation", _state_value)
 
 def _match_state_store():
-    sv = StateValue(feature_id=2, entity_id=None, value=0.5, last_updated_ts=0)
+    sv = StateValue(feature_id=2, entity_id=None, value=ScalarValue(value=0.5), last_updated_ts=0)
     store = MatchStateStore(match_id="m-1", match_states=[sv])
     assert store.team_states == []
     assert store.player_states == []
